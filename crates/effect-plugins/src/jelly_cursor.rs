@@ -1,9 +1,9 @@
-//! Jelly cursor — elastic text-cursor animation.
+//! Jelly cursor — spring-animated synthetic text cursor.
 //!
-//! Ported from the `jelly` style of manateelazycat/holo-layer's
-//! `plugin/cursor_animation.py`. When Emacs's text caret moves, a filled
-//! quadrilateral stretches from the previous rect to the new one over
-//! `DURATION`, then collapses into the new rect.
+//! Emacs hides its native caret while this effect is enabled. The compositor
+//! therefore keeps drawing the synthetic caret after it settles instead of
+//! rendering only a temporary trail. Each corner owns a critically damped
+//! spring; new reports retarget all four without discarding their velocities.
 //!
 //! Caret rects arrive via IPC (`SetCursorRect`), computed by the elisp
 //! client in `post-command-hook`. The compositor owns only the animation
@@ -32,7 +32,13 @@ use effect_core::paint_buffer;
 // Tuning
 // ---------------------------------------------------------------------------
 
-const DURATION: Duration = Duration::from_millis(200);
+/// Centre frequency of the critically damped corner springs, in radians/sec.
+const SPRING_OMEGA: f64 = 26.0;
+/// Leading corners respond faster and trailing corners slower. The projection
+/// along the movement direction interpolates across this range.
+const SPRING_DEFORMATION: f64 = 6.0;
+const POSITION_EPSILON: f64 = 0.02;
+const VELOCITY_EPSILON: f64 = 0.5;
 /// Default cursor color (BGRA) — Catppuccin Mocha sky #89dceb.
 const DEFAULT_COLOR_SOLID: [u8; 4] = [0xeb, 0xdc, 0x89, 0xc8];
 /// Alpha applied to all jelly colors (0..=255).
@@ -47,28 +53,89 @@ const EPS: f64 = 1e-9;
 // ---------------------------------------------------------------------------
 
 type RectF = Rectangle<f64, Logical>;
+type Corners = [Point<f64, Logical>; 4];
+type CornerVelocities = [[f64; 2]; 4];
 
-enum AnimState {
-    /// No caret known (either never reported or host told us to cancel).
-    Idle,
-    /// Last known caret rect; next `update` with a different rect starts
-    /// an animation.
-    Primed(RectF),
-    /// Interpolating `from → to`.
-    Animating {
-        from: RectF,
-        to: RectF,
-        start: Duration,
-    },
+struct SpringState {
+    current: Corners,
+    target: Corners,
+    velocity: CornerVelocities,
+    omega: [f64; 4],
+    last_tick: Duration,
+    moving: bool,
 }
 
-impl AnimState {
-    fn last_rect(&self) -> Option<RectF> {
-        match self {
-            AnimState::Idle => None,
-            AnimState::Primed(r) => Some(*r),
-            AnimState::Animating { to, .. } => Some(*to),
+impl SpringState {
+    fn new(rect: RectF, now: Duration) -> Self {
+        let corners = rect_corners(rect);
+        Self {
+            current: corners,
+            target: corners,
+            velocity: [[0.0; 2]; 4],
+            omega: [SPRING_OMEGA; 4],
+            last_tick: now,
+            moving: false,
         }
+    }
+
+    fn advance_to(&mut self, now: Duration) {
+        let dt = now.saturating_sub(self.last_tick).as_secs_f64();
+        self.last_tick = now;
+        if !self.moving || dt <= 0.0 {
+            return;
+        }
+
+        for i in 0..4 {
+            step_critically_damped(
+                &mut self.current[i].x,
+                &mut self.velocity[i][0],
+                self.target[i].x,
+                self.omega[i],
+                dt,
+            );
+            step_critically_damped(
+                &mut self.current[i].y,
+                &mut self.velocity[i][1],
+                self.target[i].y,
+                self.omega[i],
+                dt,
+            );
+        }
+
+        let settled = self
+            .current
+            .iter()
+            .zip(self.target.iter())
+            .all(|(value, target)| {
+                (value.x - target.x).abs() <= POSITION_EPSILON
+                    && (value.y - target.y).abs() <= POSITION_EPSILON
+            })
+            && self
+                .velocity
+                .iter()
+                .flatten()
+                .all(|velocity| velocity.abs() <= VELOCITY_EPSILON);
+        if settled {
+            self.current = self.target;
+            self.velocity = [[0.0; 2]; 4];
+            self.moving = false;
+        }
+    }
+
+    fn retarget(&mut self, rect: RectF, now: Duration) {
+        self.advance_to(now);
+        let target = rect_corners(rect);
+        if corners_equal(&self.target, &target) {
+            return;
+        }
+        self.omega = corner_frequencies(&self.current, &target);
+        self.target = target;
+        self.moving = !corners_equal(&self.current, &self.target)
+            || self
+                .velocity
+                .iter()
+                .flatten()
+                .any(|velocity| velocity.abs() > VELOCITY_EPSILON);
     }
 }
 
@@ -78,11 +145,10 @@ impl AnimState {
 
 pub struct JellyCursor {
     enabled: bool,
-    state: AnimState,
+    state: Option<SpringState>,
     buf: MemoryRenderBuffer,
     commit: CommitCounter,
     color_solid: [u8; 4],
-    color_light: [u8; 4],
 }
 
 impl Default for JellyCursor {
@@ -95,18 +161,17 @@ impl JellyCursor {
     pub fn new() -> Self {
         Self {
             enabled: false,
-            state: AnimState::Idle,
+            state: None,
             buf: MemoryRenderBuffer::new(Fourcc::Argb8888, (1, 1), 1, Transform::Normal, None),
             commit: CommitCounter::default(),
             color_solid: DEFAULT_COLOR_SOLID,
-            color_light: lighter_bgra(DEFAULT_COLOR_SOLID),
         }
     }
 
     pub fn set_enabled(&mut self, enabled: bool) {
         self.enabled = enabled;
         if !enabled {
-            self.state = AnimState::Idle;
+            self.state = None;
         }
     }
 
@@ -115,7 +180,6 @@ impl JellyCursor {
     pub fn set_color_hex(&mut self, hex: &str) {
         if let Some(bgra) = parse_hex_color(hex) {
             self.color_solid = bgra;
-            self.color_light = lighter_bgra(bgra);
         }
     }
 
@@ -126,31 +190,14 @@ impl JellyCursor {
             return;
         }
         let Some(r) = rect else {
-            self.state = AnimState::Idle;
+            self.state = None;
             return;
         };
         let target = rect_i32_to_f64(r);
-        self.state = match self.state.last_rect() {
-            None => AnimState::Primed(target),
-            Some(last) if rects_equal(last, target) => return,
-            Some(last) => AnimState::Animating {
-                from: last,
-                to: target,
-                start: now,
-            },
-        };
-    }
-
-    /// Animating endpoints and [0, 1] progress, or None when not animating.
-    fn progress(&self, now: Duration) -> Option<(f64, RectF, RectF)> {
-        let AnimState::Animating { from, to, start } = &self.state else {
-            return None;
-        };
-        let elapsed = now.saturating_sub(*start);
-        if elapsed >= DURATION {
-            return None;
+        match &mut self.state {
+            Some(state) => state.retarget(target, now),
+            None => self.state = Some(SpringState::new(target, now)),
         }
-        Some((elapsed.as_secs_f64() / DURATION.as_secs_f64(), *from, *to))
     }
 }
 
@@ -172,14 +219,8 @@ impl effect_core::Effect for JellyCursor {
     }
 
     fn pre_paint(&mut self, ctx: &effect_core::EffectCtx) {
-        // Transition Animating → Primed when elapsed exceeds DURATION.
-        // Bumping commit makes the damage tracker repaint the cleared area.
-        if let AnimState::Animating { to, start, .. } = &self.state {
-            if ctx.present_time.saturating_sub(*start) >= DURATION {
-                let to = *to;
-                self.state = AnimState::Primed(to);
-                self.commit.increment();
-            }
+        if let Some(state) = &mut self.state {
+            state.advance_to(ctx.present_time);
         }
     }
 
@@ -188,11 +229,10 @@ impl effect_core::Effect for JellyCursor {
         renderer: &mut GlesRenderer,
         ctx: &effect_core::EffectCtx,
     ) -> Vec<effect_core::CustomElement<GlesRenderer>> {
-        let Some((p, from, to)) = self.progress(ctx.present_time) else {
+        let Some(state) = &self.state else {
             return Vec::new();
         };
-
-        let pts = jelly_polygon(from, to, p);
+        let pts = state.current;
         let (min_x, min_y, max_x, max_y) = bounds(&pts);
         let bbox_x = min_x.floor() as i32 - BBOX_PAD;
         let bbox_y = min_y.floor() as i32 - BBOX_PAD;
@@ -202,9 +242,9 @@ impl effect_core::Effect for JellyCursor {
         let origin = Point::<f64, Logical>::from((bbox_x as f64, bbox_y as f64));
         let pts_local: [Point<f64, Logical>; 4] = std::array::from_fn(|i| pts[i] - origin);
         let gradient = Gradient {
-            from: rect_center(from) - origin,
-            to: rect_center(to) - origin,
-            c_start: self.color_light,
+            from: pts[0] - origin,
+            to: pts[0] - origin,
+            c_start: self.color_solid,
             c_end: self.color_solid,
         };
 
@@ -239,90 +279,76 @@ impl effect_core::Effect for JellyCursor {
     }
 
     fn post_paint(&mut self) -> bool {
-        matches!(self.state, AnimState::Animating { .. })
+        self.state.as_ref().is_some_and(|state| state.moving)
     }
 }
 
 // ---------------------------------------------------------------------------
-// Polygon geometry — direct port of cursor_animation.py's `jelly_polygon`
+// Spring and rectangle geometry
 // ---------------------------------------------------------------------------
 
-fn jelly_polygon(start: RectF, end: RectF, p: f64) -> [Point<f64, Logical>; 4] {
-    let cs = start.loc;
-    let ce = end.loc;
-    let (ws, hs) = (start.size.w, start.size.h);
-    let (we, he) = (end.size.w, end.size.h);
-    let dx = cs.x - ce.x;
-    let dy = cs.y - ce.y;
+fn step_critically_damped(
+    position: &mut f64,
+    velocity: &mut f64,
+    target: f64,
+    omega: f64,
+    dt: f64,
+) {
+    let displacement = *position - target;
+    let coefficient = *velocity + omega * displacement;
+    let decay = (-omega * dt).exp();
+    *position = target + (displacement + coefficient * dt) * decay;
+    *velocity = (*velocity - omega * coefficient * dt) * decay;
+}
 
-    // Four base corners per motion quadrant — keeps the polygon convex and
-    // non-self-intersecting regardless of direction.
-    let mut pts = if dx * dy > 0.0 {
-        [
-            cs,
-            cs + Point::from((ws, hs)),
-            ce + Point::from((we, he)),
-            ce,
-        ]
-    } else if dx * dy < 0.0 {
-        [
-            cs + Point::from((0.0, hs)),
-            cs + Point::from((ws, 0.0)),
-            ce + Point::from((we, 0.0)),
-            ce + Point::from((0.0, he)),
-        ]
-    } else if dx.abs() < EPS {
-        if dy >= 0.0 {
-            [
-                cs + Point::from((0.0, hs)),
-                cs + Point::from((ws, hs)),
-                ce + Point::from((we, 0.0)),
-                ce,
-            ]
-        } else {
-            [
-                cs,
-                cs + Point::from((ws, 0.0)),
-                ce + Point::from((we, he)),
-                ce + Point::from((0.0, he)),
-            ]
-        }
-    } else if dx >= 0.0 {
-        [
-            cs + Point::from((ws, 0.0)),
-            cs + Point::from((ws, hs)),
-            ce + Point::from((0.0, he)),
-            ce,
-        ]
-    } else {
-        [
-            cs,
-            cs + Point::from((0.0, hs)),
-            ce + Point::from((we, he)),
-            ce + Point::from((we, 0.0)),
-        ]
-    };
+fn rect_corners(rect: RectF) -> Corners {
+    let loc = rect.loc;
+    let w = rect.size.w;
+    let h = rect.size.h;
+    [
+        loc,
+        loc + Point::from((w, 0.0)),
+        loc + Point::from((w, h)),
+        loc + Point::from((0.0, h)),
+    ]
+}
 
-    // Two-phase deformation around p = 0.5: leading edge slides out, then
-    // trailing edge collapses onto it.
-    if p < 0.5 {
-        let k = p * 2.0;
-        pts[2] = lerp(pts[1], pts[2], k);
-        pts[3] = lerp(pts[0], pts[3], k);
-    } else {
-        let k = (p - 0.5) * 2.0;
-        pts[0] = lerp(pts[0], pts[3], k);
-        pts[1] = lerp(pts[1], pts[2], k);
+fn corners_equal(a: &Corners, b: &Corners) -> bool {
+    const E: f64 = 0.5;
+    a.iter()
+        .zip(b.iter())
+        .all(|(a, b)| (a.x - b.x).abs() < E && (a.y - b.y).abs() < E)
+}
+
+fn corners_center(corners: &Corners) -> Point<f64, Logical> {
+    let (x, y) = corners
+        .iter()
+        .fold((0.0, 0.0), |(x, y), corner| (x + corner.x, y + corner.y));
+    Point::from((x * 0.25, y * 0.25))
+}
+
+fn corner_frequencies(current: &Corners, target: &Corners) -> [f64; 4] {
+    let from = corners_center(current);
+    let to = corners_center(target);
+    let dx = to.x - from.x;
+    let dy = to.y - from.y;
+    let distance = dx.hypot(dy);
+    if distance < POSITION_EPSILON {
+        return [SPRING_OMEGA; 4];
     }
-    pts
-}
 
-fn lerp(a: Point<f64, Logical>, b: Point<f64, Logical>, t: f64) -> Point<f64, Logical> {
-    Point::from((a.x + (b.x - a.x) * t, a.y + (b.y - a.y) * t))
-}
+    let direction = (dx / distance, dy / distance);
+    let max_projection = target
+        .iter()
+        .map(|corner| ((corner.x - to.x) * direction.0 + (corner.y - to.y) * direction.1).abs())
+        .fold(0.0_f64, f64::max)
+        .max(EPS);
 
-fn rect_center(r: RectF) -> Point<f64, Logical> {
-    Point::from((r.loc.x + r.size.w * 0.5, r.loc.y + r.size.h * 0.5))
+    std::array::from_fn(|i| {
+        let projection = ((target[i].x - to.x) * direction.0 + (target[i].y - to.y) * direction.1)
+            / max_projection;
+        SPRING_OMEGA + SPRING_DEFORMATION * projection.clamp(-1.0, 1.0)
+    })
 }
 
 fn rect_i32_to_f64(r: Rectangle<i32, Logical>) -> RectF {
@@ -330,14 +356,6 @@ fn rect_i32_to_f64(r: Rectangle<i32, Logical>) -> RectF {
         Point::from((r.loc.x as f64, r.loc.y as f64)),
         Size::from((r.size.w as f64, r.size.h as f64)),
     )
-}
-
-fn rects_equal(a: RectF, b: RectF) -> bool {
-    const E: f64 = 0.5;
-    (a.loc.x - b.loc.x).abs() < E
-        && (a.loc.y - b.loc.y).abs() < E
-        && (a.size.w - b.size.w).abs() < E
-        && (a.size.h - b.size.h).abs() < E
 }
 
 /// Single-pass x/y min/max over 4 points.
@@ -508,12 +526,6 @@ fn parse_hex_color(s: &str) -> Option<[u8; 4]> {
     Some([b, g, r, a])
 }
 
-/// Qt's `QColor::lighter(150)` approximation — half-way to opaque white.
-fn lighter_bgra(c: [u8; 4]) -> [u8; 4] {
-    let mix_white = |v: u8| ((v as u16 + 255) / 2) as u8;
-    [mix_white(c[0]), mix_white(c[1]), mix_white(c[2]), c[3]]
-}
-
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
@@ -527,26 +539,14 @@ mod tests {
     }
 
     #[test]
-    fn polygon_at_p0_matches_start_rect_corners() {
-        let start = rect(0.0, 0.0, 8.0, 16.0);
-        let end = rect(20.0, 0.0, 8.0, 16.0);
-        let pts = jelly_polygon(start, end, 0.0);
-        assert!((pts[0].x - 0.0).abs() < 1e-6);
-        assert!((pts[1].x - 0.0).abs() < 1e-6);
-    }
-
-    #[test]
-    fn polygon_at_p1_collapses_to_end_rect() {
-        let start = rect(0.0, 0.0, 8.0, 16.0);
-        let end = rect(20.0, 0.0, 8.0, 16.0);
-        let pts = jelly_polygon(start, end, 1.0);
-        let on_end = |p: Point<f64, Logical>| {
-            p.x >= end.loc.x - 0.5
-                && p.x <= end.loc.x + end.size.w + 0.5
-                && p.y >= end.loc.y - 0.5
-                && p.y <= end.loc.y + end.size.h + 0.5
-        };
-        assert!(pts.iter().all(|&p| on_end(p)), "pts = {:?}", pts);
+    fn critical_spring_converges_without_overshoot() {
+        let mut position = 0.0;
+        let mut velocity = 0.0;
+        for _ in 0..60 {
+            step_critically_damped(&mut position, &mut velocity, 20.0, SPRING_OMEGA, 1.0 / 60.0);
+            assert!((0.0..=20.0).contains(&position));
+        }
+        assert!((position - 20.0).abs() < POSITION_EPSILON);
     }
 
     #[test]
@@ -597,18 +597,10 @@ mod tests {
     }
 
     #[test]
-    fn lighter_moves_halfway_to_white() {
-        let lit = lighter_bgra([0, 0, 0, 0xff]);
-        assert_eq!(lit[0], 127);
-        assert_eq!(lit[3], 0xff);
-    }
-
-    #[test]
-    fn set_color_hex_updates_solid_and_light() {
+    fn set_color_hex_updates_solid_color() {
         let mut jc = JellyCursor::new();
         jc.set_color_hex("#000000");
         assert_eq!(jc.color_solid, [0, 0, 0, COLOR_ALPHA]);
-        assert_eq!(jc.color_light, lighter_bgra([0, 0, 0, COLOR_ALPHA]));
     }
 
     #[test]
@@ -619,15 +611,20 @@ mod tests {
             Some(Rectangle::new((10, 10).into(), (8, 16).into())),
             Duration::ZERO,
         );
-        assert!(matches!(jc.state, AnimState::Primed(_)));
+        assert!(jc.state.is_some());
         jc.update(None, Duration::from_millis(50));
-        assert!(matches!(jc.state, AnimState::Idle));
-        // Re-entry after Idle: no animation.
+        assert!(jc.state.is_none());
+        // Re-entry after Idle starts settled at the new position.
         jc.update(
             Some(Rectangle::new((30, 30).into(), (8, 16).into())),
             Duration::from_millis(100),
         );
-        assert!(matches!(jc.state, AnimState::Primed(_)));
+        let state = jc.state.as_ref().unwrap();
+        assert!(!state.moving);
+        assert!(corners_equal(
+            &state.current,
+            &rect_corners(rect(30.0, 30.0, 8.0, 16.0))
+        ));
     }
 
     #[test]
@@ -642,7 +639,16 @@ mod tests {
             Some(Rectangle::new((20, 0).into(), (8, 16).into())),
             Duration::from_millis(10),
         );
-        assert!(matches!(jc.state, AnimState::Animating { .. }));
+        let state = jc.state.as_ref().unwrap();
+        assert!(state.moving);
+        assert!(corners_equal(
+            &state.current,
+            &rect_corners(rect(0.0, 0.0, 8.0, 16.0))
+        ));
+        assert!(corners_equal(
+            &state.target,
+            &rect_corners(rect(20.0, 0.0, 8.0, 16.0))
+        ));
     }
 
     #[test]
@@ -661,12 +667,50 @@ mod tests {
             Some(Rectangle::new((40, 0).into(), (8, 16).into())),
             Duration::from_millis(15),
         );
-        match jc.state {
-            AnimState::Animating { from, to, .. } => {
-                assert!((from.loc.x - 20.0).abs() < 1e-6, "from = {:?}", from);
-                assert!((to.loc.x - 40.0).abs() < 1e-6, "to = {:?}", to);
-            }
-            _ => panic!("expected Animating"),
-        }
+        let state = jc.state.as_ref().unwrap();
+        let current_x = corners_center(&state.current).x;
+        assert!(current_x > 0.0 && current_x < 20.0);
+        assert!((corners_center(&state.target).x - 44.0).abs() < 1e-6);
+        assert!(
+            state.velocity.iter().any(|velocity| velocity[0] > 0.0),
+            "velocity = {:?}",
+            state.velocity
+        );
+    }
+
+    #[test]
+    fn leading_corners_move_faster_than_trailing_corners() {
+        let mut state = SpringState::new(rect(0.0, 0.0, 8.0, 16.0), Duration::ZERO);
+        state.retarget(rect(20.0, 0.0, 8.0, 16.0), Duration::ZERO);
+        state.advance_to(Duration::from_millis(50));
+
+        let trailing_displacement = state.current[0].x;
+        let leading_displacement = state.current[1].x - 8.0;
+        assert!(
+            leading_displacement > trailing_displacement,
+            "leading={leading_displacement}, trailing={trailing_displacement}"
+        );
+        assert!(state.omega[1] > state.omega[0]);
+    }
+
+    #[test]
+    fn settled_cursor_stays_present() {
+        let mut jc = JellyCursor::new();
+        jc.set_enabled(true);
+        jc.update(
+            Some(Rectangle::new((0, 0).into(), (8, 16).into())),
+            Duration::ZERO,
+        );
+        jc.update(
+            Some(Rectangle::new((20, 0).into(), (8, 16).into())),
+            Duration::from_millis(10),
+        );
+        jc.state
+            .as_mut()
+            .unwrap()
+            .advance_to(Duration::from_secs(1));
+        let state = jc.state.as_ref().unwrap();
+        assert!(!state.moving);
+        assert!(corners_equal(&state.current, &state.target));
     }
 }

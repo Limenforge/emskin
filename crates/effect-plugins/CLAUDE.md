@@ -48,16 +48,15 @@ Elastic trailing animation: 10 spring-damped nodes follow the cursor in a chain.
 
 ### `jelly_cursor` — chain_position 77
 
-Port of holo-layer's `jelly` text-cursor animation. When Emacs's caret moves, a filled quadrilateral stretches from the previous caret rect to the new one over 200 ms, then collapses into the new rect (two-phase deformation around `p = 0.5`). Scanline-fills the polygon into a bounding-box-sized `MemoryRenderBuffer` each frame with a linear gradient (lightened tail → solid head).
+Spring-animated synthetic text cursor. Emacs hides its native caret while connected; the plugin always draws the replacement polygon, including after it settles. Each corner has an independent critically damped spring. Leading corners respond faster than trailing corners to deform along the motion direction, and new reports retarget all four without discarding velocity.
 
 - `pub fn set_enabled(bool)` — toggle
 - `pub fn update(rect: Option<Rectangle<i32, Logical>>, now: Duration)` — host hands in the current caret rect in **canvas** coordinates:
-  - `None` → cancel animation, forget last rect (so re-entry re-primes)
-  - first `Some` after a `None` → prime, no animation
-  - `Some` equal to last → no-op
-  - `Some` different → seed a new animation from the previous rect
-- Data source: `zwp_text_input_v3.set_cursor_rectangle`. pgtk Emacs reports this on every caret move via GTK's IM framework — **pgtk-only**. GTK3 Emacs (XWayland) has no Wayland-side caret signal.
-- Host (emskin) drives this from `EmskinState::sync_jelly_caret()` called once per frame. It polls `seat.text_input().focus()` + `cursor_rectangle()`, filters for the active Emacs surface, and resets on focus boundary transitions (app → Emacs, Emacs → app) so the animation never spans two surfaces.
+  - `None` → cancel and forget the synthetic caret
+  - first `Some` after a `None` → show the caret immediately at that rect
+  - `Some` equal to the target → no-op
+  - `Some` different → advance to the report timestamp, then retarget while preserving velocity
+- Data source: elisp IPC from `post-command-hook`; see `elisp/emskin-jelly.el`. The Elisp side gets block/hbar width from Emacs's rendered glyph metrics (`posn-at-point` + `posn-object-width-height`), preserves Evil's block/bar/hbar shape, hides native carets in visible buffers, restores them when disabled or disconnected, and suppresses the synthetic caret while the frame lacks focus.
 
 ### `recorder` — chain_position 90
 

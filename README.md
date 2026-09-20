@@ -142,7 +142,7 @@ emskin ships five live-toggleable effects, plus a non-toggleable startup splash.
 | measure | `emskin-measure` | `M-x emskin-toggle-measure` | Figma-style pixel inspector: crosshair, coordinates, rulers |
 | skeleton | `emskin-skeleton` | `M-x emskin-toggle-skeleton` | Frame-layout wireframes (debug overlay, clickable labels) |
 | cursor trail | `emskin-cursor-trail` | `M-x emskin-toggle-cursor-trail` | Elastic spring trail behind the mouse pointer |
-| jelly cursor | `emskin-jelly-cursor` | `M-x emskin-toggle-jelly-cursor` | Jelly-style animation on Emacs's text caret (pgtk-only color sync) |
+| jelly cursor | `emskin-jelly-cursor` | `M-x emskin-toggle-jelly-cursor` | Glyph-sized synthetic caret with four deforming, velocity-preserving corner springs |
 | recorder | `emskin-record` | `M-x emskin-toggle-record` | MP4 screen capture with on-screen indicator (red dot + MM:SS timer) |
 
 All default to off. Configure in `~/.emacs.d/init.el`:

@@ -11,7 +11,7 @@
 //! - [`skeleton`] — frame layout debug overlay (wireframes + clickable labels)
 //! - [`splash`] — startup animation, dismissed on Emacs connect
 //! - [`cursor_trail`] — elastic trailing animation behind the mouse cursor
-//! - [`jelly_cursor`] — holo-layer-style elastic animation of Emacs's text caret
+//! - [`jelly_cursor`] — spring-animated synthetic Emacs text caret
 //! - [`key_cast`] — screencast-style chord display at the bottom of the canvas
 //!
 //! Workspace bar used to live here but was extracted into a standalone

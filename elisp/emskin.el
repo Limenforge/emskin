@@ -55,9 +55,11 @@ manually with `emskin-toggle-key-cast'.")
 
 (defvar emskin-jelly-cursor nil
   "Non-nil to show the jelly text-cursor animation.
-On every command that moves point, a filled quadrilateral stretches
-from the previous caret rect to the new one (200 ms), then collapses
-into the new position.  Ported from holo-layer's `jelly' style.
+The native Emacs caret is hidden while connected, and emskin draws a
+synthetic caret whose complete rectangle follows new positions with a
+critically damped spring.  Its width follows the actual rendered glyph, and
+rapid input retargets four independent corner springs while preserving their
+velocities.
 Toggle with `emskin-toggle-jelly-cursor'.")
 
 (defvar emskin-jelly-fallback-color "#89dceb"

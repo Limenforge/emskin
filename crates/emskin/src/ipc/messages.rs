@@ -88,8 +88,8 @@ pub enum IncomingMessage {
     },
     /// Report Emacs's current text-cursor rectangle (Emacs surface-local
     /// coordinates) and optional color. Sent from `post-command-hook` when
-    /// the cursor moves; triggers a 200ms jelly animation from the previous
-    /// rect to the new one.
+    /// the cursor moves; retargets the synthetic caret's four corner springs
+    /// while preserving their current velocities.
     ///
     /// `color` is a CSS hex string like "#cba6f7" (optional; compositor
     /// falls back to a default if missing or unparseable). Sending w or h

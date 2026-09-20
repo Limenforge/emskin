@@ -12,6 +12,11 @@ Each effect module adds its `--sync' helper here so it can push its
 current variable value to the compositor without the main file
 having to know about every effect.")
 
+(defvar emskin-disconnected-hook nil
+  "Hook run after the IPC connection to emskin is lost.
+Effects that temporarily change native Emacs presentation state use
+this to restore it when the compositor can no longer draw overlays.")
+
 (defsubst emskin--jbool (val)
   "Coerce VAL to a JSON-compatible boolean (`t' or `:json-false')."
   (if val t :json-false))
@@ -200,7 +205,8 @@ Coerces buffer to unibyte so aref always yields raw byte values 0-255."
   (ignore proc)
   (when (string-match-p "\\(closed\\|failed\\|broken\\|finished\\)" event)
     (message "emskin: IPC connection %s" (string-trim event))
-    (setq emskin--process nil)))
+    (setq emskin--process nil)
+    (run-hooks 'emskin-disconnected-hook)))
 
 ;; ---------------------------------------------------------------------------
 ;; Send / Connect
