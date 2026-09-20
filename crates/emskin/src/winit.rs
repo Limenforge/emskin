@@ -364,7 +364,7 @@ pub fn init_winit(
     fullscreen: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let attributes = winit_crate::window::Window::default_attributes()
-        .with_inner_size(winit_crate::dpi::LogicalSize::new(1280.0, 800.0))
+        .with_inner_size(winit_crate::dpi::LogicalSize::new(730.0, 970.0))
         .with_title("Emacs")
         .with_visible(true)
         .with_name("emskin", "emskin");
@@ -374,8 +374,6 @@ pub fn init_winit(
             .window()
             .set_fullscreen(Some(winit_crate::window::Fullscreen::Borderless(None)));
         state.emacs.request_fullscreen(true);
-    } else {
-        backend.window().set_maximized(true);
     }
 
     let mode = make_mode(backend.window_size());
