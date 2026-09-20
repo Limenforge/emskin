@@ -8,6 +8,36 @@
 
 [中文文档](README_cn.md)
 
+## Smoother jelly cursor
+
+This fork reimplements emskin's jelly cursor to feel closer to editors such as
+Zed and Neovide.
+
+The original behavior is: the Emacs caret jumps directly to its destination,
+then emskin fills the gap between the old and new positions with a jelly
+animation. During fast movement, the initial jump remains noticeable and makes
+the motion feel less continuous.
+
+The new implementation lets emskin take over the visible caret. When enabled,
+the native Emacs caret is hidden. emskin continuously draws the caret at the
+position reported by Emacs and uses a spring animation to move it naturally
+towards each new target.
+
+The four corners move separately, creating a subtle stretch and rebound. The
+leading edge catches up faster while the opposite edge follows a little more
+slowly, producing a more natural deformation. Repeated input updates the target
+directly while preserving the existing motion, so rapid typing and continuous
+movement do not break into separate animations.
+
+Caret width comes directly from the glyph rendered by Emacs. CJK characters,
+emoji, tabs, and variable-pitch text therefore keep the correct cursor size.
+
+![Smoother jelly cursor demo](images/jelly-cursor-demo.gif)
+
+<sub>Demo and test environment: WSL2 with WSLg · Arch Linux · GNU Emacs 31.1 (PGTK) · Doom Emacs</sub>
+
+---
+
 emskin wraps Emacs inside a nested Wayland compositor so that **any program** — browsers, terminals, video players, etc. — can be embedded into Emacs windows as if they were native buffers.
 
 ![demo](images/demo.gif)
@@ -142,7 +172,7 @@ emskin ships five live-toggleable effects, plus a non-toggleable startup splash.
 | measure | `emskin-measure` | `M-x emskin-toggle-measure` | Figma-style pixel inspector: crosshair, coordinates, rulers |
 | skeleton | `emskin-skeleton` | `M-x emskin-toggle-skeleton` | Frame-layout wireframes (debug overlay, clickable labels) |
 | cursor trail | `emskin-cursor-trail` | `M-x emskin-toggle-cursor-trail` | Elastic spring trail behind the mouse pointer |
-| jelly cursor | `emskin-jelly-cursor` | `M-x emskin-toggle-jelly-cursor` | Glyph-sized synthetic caret with four deforming, velocity-preserving corner springs |
+| jelly cursor | `emskin-jelly-cursor` | `M-x emskin-toggle-jelly-cursor` | Smoother caret motion with natural stretch and rebound |
 | recorder | `emskin-record` | `M-x emskin-toggle-record` | MP4 screen capture with on-screen indicator (red dot + MM:SS timer) |
 
 All default to off. Configure in `~/.emacs.d/init.el`:

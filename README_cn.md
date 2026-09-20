@@ -8,6 +8,33 @@
 
 [English](README.md)
 
+## 更丝滑的果冻光标
+
+重新实现了 emskin 的果冻光标，让光标移动更接近 Zed、Neovide 一类
+编辑器的效果。
+
+原版的行为是：光标先直接跳到目标位置，再在旧位置和新位置之间
+补上一段果冻动画。快速移动时能感觉到光标发生了一次瞬移，因此整体
+手感不够连贯。
+
+新的实现让 emskin 接管可见光标。启用后，Emacs 自身的光标会被隐藏，
+emskin 根据 Emacs 提供的位置持续绘制光标，并用弹簧动画让它自然移动到
+新的位置。
+
+光标的四个角分别运动，因此移动时会产生轻微的拉伸和回弹。前进方向的
+一侧会更快跟上目标，另一侧稍慢一些，从而形成更自然的形变。连续按键时，
+光标会直接追随新的目标，并保留之前的运动状态，所以快速输入和连续移动时
+不会出现一段段彼此断开的动画。
+
+光标宽度直接使用 Emacs 实际渲染出的字形宽度，因此中文、emoji、制表符
+以及 variable-pitch 文本都能保持正确的光标尺寸。
+
+![更丝滑的果冻光标演示](images/jelly-cursor-demo.gif)
+
+<sub>演示与测试环境：WSL2（WSLg）· Arch Linux · GNU Emacs 31.1（PGTK）· Doom Emacs</sub>
+
+---
+
 emskin 把 Emacs 放进一个 Wayland 合成器里，让**任意程序**（浏览器、终端、视频播放器等）都能像原生 buffer 一样嵌入 Emacs 窗口。
 
 ![demo](images/demo.gif)
@@ -139,7 +166,7 @@ emskin 内置五个可开关的特效，另外还有一个只在启动时播放�
 | 测量 | `emskin-measure` | `M-x emskin-toggle-measure` | Figma 风格像素检查器：十字准线 + 坐标 + 标尺 |
 | 骨架 | `emskin-skeleton` | `M-x emskin-toggle-skeleton` | 布局调试线框（点击标签闪烁对应 rect） |
 | 光标拖尾 | `emskin-cursor-trail` | `M-x emskin-toggle-cursor-trail` | 鼠标指针后的弹性拖尾 |
-| 果冻光标 | `emskin-jelly-cursor` | `M-x emskin-toggle-jelly-cursor` | Emacs 文本光标的果冻变形动画（pgtk） |
+| 果冻光标 | `emskin-jelly-cursor` | `M-x emskin-toggle-jelly-cursor` | 移动更连贯，并带有自然的拉伸和回弹 |
 | 录屏 | `emskin-record` | `M-x emskin-toggle-record` | MP4 录屏，伴随屏幕指示器（红点 + MM:SS 计时） |
 
 全部默认关闭。在 `~/.emacs.d/init.el` 里配置：
