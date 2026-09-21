@@ -55,10 +55,14 @@ pub fn event_loop_tick(state: &mut EmskinState) {
 
     // --- Dispatch incoming IPC messages from Emacs ---
     if let Some(msgs) = state.ipc.recv_all() {
-        for msg in msgs {
-            crate::ipc::dispatch::handle_ipc_message(state, msg);
+        // recv_all returns Some(empty) while the socket is connected but no
+        // complete message arrived. That is not a reason to repaint.
+        if !msgs.is_empty() {
+            for msg in msgs {
+                crate::ipc::dispatch::handle_ipc_message(state, msg);
+            }
+            state.needs_redraw = true;
         }
-        state.needs_redraw = true;
     }
 
     state.ipc.flush();
@@ -122,6 +126,12 @@ pub fn event_loop_tick(state: &mut EmskinState) {
     // (Alacritty etc.) whose cursor_rectangle arrives async after
     // focus.
     state.ime.poll_tip_freshness(&state.seat, &state.apps);
+
+    if state.needs_redraw {
+        if let Some(backend) = state.backend.as_ref() {
+            backend.window().request_redraw();
+        }
+    }
 }
 
 /// Drain broker-observed fcitx5 events and hand them to the IME

@@ -128,6 +128,7 @@ fn render_frame(
     output: &Output,
     damage_tracker: &mut OutputDamageTracker,
 ) {
+    tracing::trace!("render frame");
     let size = backend.window_size();
 
     if output.current_mode().map(|m| m.size) != Some(size) {
@@ -465,7 +466,8 @@ pub fn init_winit(
                         render_frame(state, &mut backend, &output, &mut damage_tracker);
                     }
                     post_render(state, &output);
-                    backend.window().request_redraw();
+                    // The tick callback requests another frame only when
+                    // compositor state actually changes.
                 }
 
                 WinitEvent::CloseRequested => {
