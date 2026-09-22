@@ -103,12 +103,35 @@ FALLBACK is used at line ends or when the display engine has no glyph there."
          (width (car-safe size)))
     (if (and (numberp width) (> width 0)) width fallback)))
 
+(defun emskin--jelly-overlay-cursor-p (position)
+  "Return non-nil if a before-string at POSITION places the display cursor."
+  (catch 'cursor
+    (dolist (overlay (overlays-in position position))
+      (let ((string (overlay-get overlay 'before-string)))
+        (when (and (stringp string)
+                   (> (length string) 0)
+                   (get-text-property 0 'cursor string))
+          (throw 'cursor t))))))
+
+(defun emskin--jelly-display-cursor-position (window)
+  "Return the displayed cursor's (X Y) when an overlay relocates it.
+Emacs reports the buffer position after a before-string containing completion
+candidates, while the cursor text property keeps the caret before them."
+  (redisplay)
+  (let ((info (window-cursor-info window)))
+    (when (and info
+               (>= (aref info 1) 0)
+               (>= (aref info 2) 0))
+      (list (aref info 1) (aref info 2)))))
+
 (defun emskin--jelly-cursor-rect (cursor-shape)
   "Return (X Y W H COLOR) of the text caret in surface pixels, or nil."
   (when-let* ((shape cursor-shape)
               (p (point))
               (window (selected-window))
-              (vis (pos-visible-in-window-p p window t))
+              (vis (if (emskin--jelly-overlay-cursor-p p)
+                       (emskin--jelly-display-cursor-position window)
+                     (pos-visible-in-window-p p window t)))
               (alloc (emskin--jelly-window-origin window)))
     (let* ((wx (nth 0 alloc))
            (wy (nth 1 alloc))
