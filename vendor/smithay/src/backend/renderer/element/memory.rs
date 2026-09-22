@@ -188,17 +188,18 @@ impl MemoryBuffer {
 
     /// Resize this buffer to the size specified
     pub fn resize(&mut self, size: impl Into<Size<i32, Buffer>>) -> bool {
-        self.size = size.into();
+        let size = size.into();
+        let size_changed = self.size != size;
+        self.size = size;
         self.stride =
             self.size.w * (get_bpp(self.format).expect("Format with unknown bits per pixel") / 8) as i32;
         let mem_size = (self.stride * self.size.h) as usize;
-        if self.mem.len() != mem_size {
+        let storage_changed = self.mem.len() != mem_size;
+        if storage_changed {
             let mem = Arc::make_mut(&mut self.mem);
             mem.resize(mem_size, 0);
-            true
-        } else {
-            false
         }
+        size_changed || storage_changed
     }
 }
 
@@ -658,5 +659,19 @@ where
     #[inline]
     fn underlying_storage(&self, _renderer: &mut R) -> Option<UnderlyingStorage<'_>> {
         Some(UnderlyingStorage::Memory(&self.buffer))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn same_area_resize_invalidates_texture_dimensions() {
+        let mut buffer = MemoryBuffer::new(Fourcc::Argb8888, (38, 39));
+        assert!(buffer.resize((39, 38)));
+        assert_eq!(buffer.size(), (39, 38).into());
+        assert_eq!(buffer.len(), 38 * 39 * 4);
+        assert!(!buffer.resize((39, 38)));
     }
 }
