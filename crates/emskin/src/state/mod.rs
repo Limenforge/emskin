@@ -417,7 +417,11 @@ impl EmskinState {
                     // Flush responses immediately so clients don't wait until
                     // the next render frame for roundtrip replies (wl_display.sync).
                     let _ = state.display_handle.flush_clients();
-                    state.needs_redraw = true;
+                    // Dispatching a client request does not necessarily change
+                    // the scene (e.g. wl_display.sync or frame callbacks).
+                    // Surface commits and visual protocol handlers request a
+                    // frame when they actually update compositor state.
+                    tracing::trace!("Wayland client requests dispatched");
                     Ok(PostAction::Continue)
                 },
             )

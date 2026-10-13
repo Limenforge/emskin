@@ -36,6 +36,11 @@ impl CompositorHandler for EmskinState {
 
     fn commit(&mut self, surface: &WlSurface) {
         on_commit_buffer_handler::<Self>(surface);
+        // A committed surface may change its buffer, position, or subsurface
+        // tree. Schedule a render for it instead of rendering after every
+        // unrelated Wayland client request.
+        self.needs_redraw = true;
+        tracing::trace!("Wayland surface committed");
         if !is_sync_subsurface(surface) {
             let mut root = surface.clone();
             while let Some(parent) = get_parent(&root) {
