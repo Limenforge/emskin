@@ -51,6 +51,7 @@ Elastic trailing animation: 10 spring-damped nodes follow the cursor in a chain.
 Spring-animated synthetic text cursor. Emacs hides its native caret while connected; the plugin always draws the replacement polygon, including after it settles. Each corner has an independent critically damped spring. Leading corners respond faster than trailing corners to deform along the motion direction, and new reports retarget all four without discarding velocity.
 
 - `pub fn set_enabled(bool)` — toggle
+- `pub fn set_motion_profile(insert_mode, cell_width, cell_height, now)` — select normal-mode (55/25 rad/s leading/trailing) or Evil insert-mode (45/25 rad/s) springs without resetting velocity. Differential corner lag is capped at 25/1 character cells respectively; the settled caret shape is unchanged. Stop below 0.5 logical pixels and 20 logical pixels/sec, then snap to the exact target.
 - `pub fn update(rect: Option<Rectangle<i32, Logical>>, now: Duration)` — host hands in the current caret rect in **canvas** coordinates:
   - `None` → cancel and forget the synthetic caret
   - first `Some` after a `None` → show the caret immediately at that rect

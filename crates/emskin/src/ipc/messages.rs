@@ -99,6 +99,12 @@ pub enum IncomingMessage {
         rect: IpcRect,
         #[serde(default)]
         color: Option<String>,
+        #[serde(default)]
+        insert_mode: bool,
+        #[serde(default)]
+        cell_width: Option<i32>,
+        #[serde(default)]
+        cell_height: Option<i32>,
     },
     /// Request a one-shot PNG screenshot of the composited output, written
     /// to the given absolute path. Replaces any previously queued request.
@@ -387,12 +393,20 @@ mod tests {
         let json = r##"{"type":"set_cursor_rect","x":10,"y":20,"w":2,"h":18,"color":"#cba6f7"}"##;
         let msg: IncomingMessage = serde_json::from_str(json).unwrap();
         match msg {
-            IncomingMessage::SetCursorRect { rect, color } => {
+            IncomingMessage::SetCursorRect {
+                rect,
+                color,
+                insert_mode,
+                cell_width,
+                cell_height,
+            } => {
                 assert_eq!(rect.x, 10);
                 assert_eq!(rect.y, 20);
                 assert_eq!(rect.w, 2);
                 assert_eq!(rect.h, 18);
                 assert_eq!(color.as_deref(), Some("#cba6f7"));
+                assert!(!insert_mode);
+                assert_eq!((cell_width, cell_height), (None, None));
             }
             _ => panic!("expected SetCursorRect"),
         }
@@ -412,6 +426,24 @@ mod tests {
                     h: 0,
                 },
                 color: None,
+                insert_mode: false,
+                cell_width: None,
+                cell_height: None,
+            }
+        ));
+    }
+
+    #[test]
+    fn parses_set_cursor_rect_with_insert_profile() {
+        let json = r#"{"type":"set_cursor_rect","x":10,"y":20,"w":2,"h":24,"insert_mode":true,"cell_width":12,"cell_height":24}"#;
+        let msg: IncomingMessage = serde_json::from_str(json).unwrap();
+        assert!(matches!(
+            msg,
+            IncomingMessage::SetCursorRect {
+                insert_mode: true,
+                cell_width: Some(12),
+                cell_height: Some(24),
+                ..
             }
         ));
     }
