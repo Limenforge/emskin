@@ -74,8 +74,14 @@ pub fn handle_ipc_message(state: &mut EmskinState, msg: IncomingMessage) {
             tracing::debug!("IPC set_jelly_cursor enabled={enabled}");
             state.effects.jelly_cursor.borrow_mut().set_enabled(enabled);
         }
-        IncomingMessage::SetCursorRect { rect, color } => {
-            ipc_set_cursor_rect(state, rect, color);
+        IncomingMessage::SetCursorRect {
+            rect,
+            color,
+            insert_mode,
+            cell_width,
+            cell_height,
+        } => {
+            ipc_set_cursor_rect(state, rect, color, insert_mode, cell_width, cell_height);
         }
         IncomingMessage::TakeScreenshot { path } => {
             tracing::debug!("IPC take_screenshot path={path}");
@@ -120,7 +126,14 @@ pub fn handle_ipc_message(state: &mut EmskinState, msg: IncomingMessage) {
     }
 }
 
-fn ipc_set_cursor_rect(state: &mut EmskinState, rect: crate::ipc::IpcRect, color: Option<String>) {
+fn ipc_set_cursor_rect(
+    state: &mut EmskinState,
+    rect: crate::ipc::IpcRect,
+    color: Option<String>,
+    insert_mode: bool,
+    cell_width: Option<i32>,
+    cell_height: Option<i32>,
+) {
     let now = state.start_time.elapsed();
     let canvas_rect = state.emacs_rect_to_canvas(rect);
     let mut jc = state.effects.jelly_cursor.borrow_mut();
@@ -132,6 +145,12 @@ fn ipc_set_cursor_rect(state: &mut EmskinState, rect: crate::ipc::IpcRect, color
         jc.update(None, now);
         return;
     }
+    jc.set_motion_profile(
+        insert_mode,
+        cell_width.unwrap_or(10),
+        cell_height.unwrap_or(rect.h),
+        now,
+    );
     jc.update(Some(canvas_rect), now);
 }
 

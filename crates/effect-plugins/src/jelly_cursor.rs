@@ -33,12 +33,16 @@ use effect_core::paint_buffer;
 // ---------------------------------------------------------------------------
 
 /// Centre frequency of the critically damped corner springs, in radians/sec.
-const SPRING_OMEGA: f64 = 26.0;
+const SPRING_OMEGA: f64 = 40.0;
 /// Leading corners respond faster and trailing corners slower. The projection
 /// along the movement direction interpolates across this range.
-const SPRING_DEFORMATION: f64 = 6.0;
-const POSITION_EPSILON: f64 = 0.02;
-const VELOCITY_EPSILON: f64 = 0.5;
+const SPRING_DEFORMATION: f64 = 15.0;
+const INSERT_SPRING_OMEGA: f64 = 35.0;
+const INSERT_SPRING_DEFORMATION: f64 = 10.0;
+/// Subpixel snap avoids drawing the visually negligible end of the spring.
+const POSITION_EPSILON: f64 = 0.5;
+/// Logical pixels/sec, rather than Neovim's characters per animation step.
+const VELOCITY_EPSILON: f64 = 20.0;
 /// Default cursor color (BGRA) — Catppuccin Mocha sky #89dceb.
 const DEFAULT_COLOR_SOLID: [u8; 4] = [0xeb, 0xdc, 0x89, 0xc8];
 /// Alpha applied to all jelly colors (0..=255).
@@ -56,6 +60,41 @@ type RectF = Rectangle<f64, Logical>;
 type Corners = [Point<f64, Logical>; 4];
 type CornerVelocities = [[f64; 2]; 4];
 
+#[derive(Clone, Copy)]
+struct MotionProfile {
+    omega: f64,
+    deformation: f64,
+    max_trail: f64,
+    cell_width: f64,
+    cell_height: f64,
+}
+
+impl Default for MotionProfile {
+    fn default() -> Self {
+        Self::new(false, 10, 20)
+    }
+}
+
+impl MotionProfile {
+    fn new(insert_mode: bool, cell_width: i32, cell_height: i32) -> Self {
+        Self {
+            omega: if insert_mode {
+                INSERT_SPRING_OMEGA
+            } else {
+                SPRING_OMEGA
+            },
+            deformation: if insert_mode {
+                INSERT_SPRING_DEFORMATION
+            } else {
+                SPRING_DEFORMATION
+            },
+            max_trail: if insert_mode { 1.0 } else { 25.0 },
+            cell_width: cell_width.max(1) as f64,
+            cell_height: cell_height.max(1) as f64,
+        }
+    }
+}
+
 struct SpringState {
     current: Corners,
     target: Corners,
@@ -63,6 +102,7 @@ struct SpringState {
     omega: [f64; 4],
     last_tick: Duration,
     moving: bool,
+    profile: MotionProfile,
 }
 
 impl SpringState {
@@ -75,6 +115,7 @@ impl SpringState {
             omega: [SPRING_OMEGA; 4],
             last_tick: now,
             moving: false,
+            profile: MotionProfile::default(),
         }
     }
 
@@ -102,6 +143,8 @@ impl SpringState {
             );
         }
 
+        self.limit_trail();
+
         let settled = self
             .current
             .iter()
@@ -128,7 +171,7 @@ impl SpringState {
         if corners_equal(&self.target, &target) {
             return;
         }
-        self.omega = corner_frequencies(&self.current, &target);
+        self.omega = corner_frequencies(&self.current, &target, self.profile);
         self.target = target;
         self.moving = !corners_equal(&self.current, &self.target)
             || self
@@ -136,6 +179,37 @@ impl SpringState {
                 .iter()
                 .flatten()
                 .any(|velocity| velocity.abs() > VELOCITY_EPSILON);
+    }
+
+    /// Bound differential lag in character cells, without shrinking the
+    /// actual cursor rectangle or clipping an ordinary one-line-tall caret.
+    fn limit_trail(&mut self) {
+        let lag: [[f64; 2]; 4] = std::array::from_fn(|i| {
+            [
+                self.current[i].x - self.target[i].x,
+                self.current[i].y - self.target[i].y,
+            ]
+        });
+        let length = |delta: [f64; 2]| {
+            (delta[0] / self.profile.cell_width).hypot(delta[1] / self.profile.cell_height)
+        };
+        let head = (0..4)
+            .min_by(|&a, &b| length(lag[a]).total_cmp(&length(lag[b])))
+            .unwrap();
+        let trail = lag
+            .iter()
+            .map(|l| length([l[0] - lag[head][0], l[1] - lag[head][1]]))
+            .fold(0.0_f64, f64::max);
+        if trail <= self.profile.max_trail {
+            return;
+        }
+        let factor = self.profile.max_trail / trail;
+        for i in 0..4 {
+            self.current[i].x =
+                self.target[i].x + lag[head][0] + (lag[i][0] - lag[head][0]) * factor;
+            self.current[i].y =
+                self.target[i].y + lag[head][1] + (lag[i][1] - lag[head][1]) * factor;
+        }
     }
 }
 
@@ -149,6 +223,7 @@ pub struct JellyCursor {
     buf: MemoryRenderBuffer,
     commit: CommitCounter,
     color_solid: [u8; 4],
+    profile: MotionProfile,
 }
 
 impl Default for JellyCursor {
@@ -165,6 +240,7 @@ impl JellyCursor {
             buf: MemoryRenderBuffer::new(Fourcc::Argb8888, (1, 1), 1, Transform::Normal, None),
             commit: CommitCounter::default(),
             color_solid: DEFAULT_COLOR_SOLID,
+            profile: MotionProfile::default(),
         }
     }
 
@@ -172,6 +248,22 @@ impl JellyCursor {
         self.enabled = enabled;
         if !enabled {
             self.state = None;
+        }
+    }
+
+    pub fn set_motion_profile(
+        &mut self,
+        insert_mode: bool,
+        cell_width: i32,
+        cell_height: i32,
+        now: Duration,
+    ) {
+        self.profile = MotionProfile::new(insert_mode, cell_width, cell_height);
+        if let Some(state) = &mut self.state {
+            state.advance_to(now);
+            state.profile = self.profile;
+            state.omega = corner_frequencies(&state.current, &state.target, state.profile);
+            state.limit_trail();
         }
     }
 
@@ -196,7 +288,11 @@ impl JellyCursor {
         let target = rect_i32_to_f64(r);
         match &mut self.state {
             Some(state) => state.retarget(target, now),
-            None => self.state = Some(SpringState::new(target, now)),
+            None => {
+                let mut state = SpringState::new(target, now);
+                state.profile = self.profile;
+                self.state = Some(state);
+            }
         }
     }
 }
@@ -327,14 +423,14 @@ fn corners_center(corners: &Corners) -> Point<f64, Logical> {
     Point::from((x * 0.25, y * 0.25))
 }
 
-fn corner_frequencies(current: &Corners, target: &Corners) -> [f64; 4] {
+fn corner_frequencies(current: &Corners, target: &Corners, profile: MotionProfile) -> [f64; 4] {
     let from = corners_center(current);
     let to = corners_center(target);
     let dx = to.x - from.x;
     let dy = to.y - from.y;
     let distance = dx.hypot(dy);
     if distance < POSITION_EPSILON {
-        return [SPRING_OMEGA; 4];
+        return [profile.omega; 4];
     }
 
     let direction = (dx / distance, dy / distance);
@@ -347,7 +443,7 @@ fn corner_frequencies(current: &Corners, target: &Corners) -> [f64; 4] {
     std::array::from_fn(|i| {
         let projection = ((target[i].x - to.x) * direction.0 + (target[i].y - to.y) * direction.1)
             / max_projection;
-        SPRING_OMEGA + SPRING_DEFORMATION * projection.clamp(-1.0, 1.0)
+        profile.omega + profile.deformation * projection.clamp(-1.0, 1.0)
     })
 }
 
@@ -691,6 +787,91 @@ mod tests {
             "leading={leading_displacement}, trailing={trailing_displacement}"
         );
         assert!(state.omega[1] > state.omega[0]);
+    }
+
+    #[test]
+    fn character_hop_settles_within_a_quarter_second() {
+        let mut state = SpringState::new(rect(0.0, 0.0, 12.0, 24.0), Duration::ZERO);
+        state.retarget(rect(12.0, 0.0, 12.0, 24.0), Duration::ZERO);
+        for frame in 1..=15 {
+            state.advance_to(Duration::from_secs_f64(frame as f64 / 60.0));
+        }
+        assert!(!state.moving);
+        assert!(corners_equal(&state.current, &state.target));
+    }
+
+    #[test]
+    fn spring_response_does_not_depend_on_frame_count() {
+        let mut once = SpringState::new(rect(0.0, 0.0, 12.0, 24.0), Duration::ZERO);
+        once.retarget(rect(120.0, 48.0, 12.0, 24.0), Duration::ZERO);
+        let mut frames = SpringState::new(rect(0.0, 0.0, 12.0, 24.0), Duration::ZERO);
+        frames.retarget(rect(120.0, 48.0, 12.0, 24.0), Duration::ZERO);
+        once.advance_to(Duration::from_millis(100));
+        for frame in 1..=6 {
+            frames.advance_to(Duration::from_secs_f64(frame as f64 / 60.0));
+        }
+        for i in 0..4 {
+            assert!((once.current[i].x - frames.current[i].x).abs() < 1e-8);
+            assert!((once.current[i].y - frames.current[i].y).abs() < 1e-8);
+        }
+    }
+
+    #[test]
+    fn insert_trail_is_bounded_for_a_large_diagonal_jump() {
+        let mut state = SpringState::new(rect(0.0, 0.0, 2.0, 24.0), Duration::ZERO);
+        state.profile = MotionProfile::new(true, 12, 24);
+        state.retarget(rect(1200.0, 960.0, 2.0, 24.0), Duration::ZERO);
+        state.advance_to(Duration::from_millis(40));
+        let lag: [[f64; 2]; 4] = std::array::from_fn(|i| {
+            [
+                state.current[i].x - state.target[i].x,
+                state.current[i].y - state.target[i].y,
+            ]
+        });
+        let norm = |l: [f64; 2]| (l[0] / 12.0).hypot(l[1] / 24.0);
+        let head = (0..4)
+            .min_by(|&a, &b| norm(lag[a]).total_cmp(&norm(lag[b])))
+            .unwrap();
+        let trail = lag
+            .iter()
+            .map(|l| norm([l[0] - lag[head][0], l[1] - lag[head][1]]))
+            .fold(0.0_f64, f64::max);
+        assert!((trail - 1.0).abs() < 1e-8);
+        state.advance_to(Duration::from_secs(2));
+        assert_eq!(state.current, state.target);
+        assert!(!state.moving);
+    }
+
+    #[test]
+    fn trail_limit_preserves_a_settled_caret_shape() {
+        let mut state = SpringState::new(rect(0.0, 0.0, 24.0, 48.0), Duration::ZERO);
+        state.profile = MotionProfile::new(true, 12, 24);
+        state.limit_trail();
+        assert_eq!(state.current, state.target);
+    }
+
+    #[test]
+    fn mode_change_preserves_in_flight_velocity() {
+        let mut jc = JellyCursor::new();
+        jc.set_enabled(true);
+        jc.update(
+            Some(Rectangle::new((0, 0).into(), (12, 24).into())),
+            Duration::ZERO,
+        );
+        jc.update(
+            Some(Rectangle::new((120, 0).into(), (12, 24).into())),
+            Duration::ZERO,
+        );
+        jc.state
+            .as_mut()
+            .unwrap()
+            .advance_to(Duration::from_millis(40));
+        let velocity = jc.state.as_ref().unwrap().velocity;
+        jc.set_motion_profile(true, 12, 24, Duration::from_millis(40));
+        let state = jc.state.as_ref().unwrap();
+        assert_eq!(state.velocity, velocity);
+        assert_eq!(state.omega[1], 45.0);
+        assert_eq!(state.omega[0], 25.0);
     }
 
     #[test]

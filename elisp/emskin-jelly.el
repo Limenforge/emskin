@@ -14,7 +14,7 @@
 (defvar emskin-jelly-fallback-color)
 
 (defvar emskin--jelly-last-info nil
-  "Last sent jelly caret `(WINDOW . \"x:y:w:h:color\")' pair.
+  "Last sent jelly caret, window, mode and character metrics.
 The window component is a cheap tiebreaker so moving to a different
 window at the same pixel coords still fires a new animation.")
 
@@ -166,6 +166,10 @@ candidates, while the cursor text property keeps the caret before them."
                   (y . ,(or (nth 1 info) 0))
                   (w . ,(or (nth 2 info) 0))
                   (h . ,(or (nth 3 info) 0))
+                  (insert_mode . ,(if (and (bound-and-true-p evil-local-mode)
+                                          (eq evil-state 'insert)) t :json-false))
+                  (cell_width . ,(frame-char-width))
+                  (cell_height . ,(frame-char-height))
                   (color . ,(or (nth 4 info) :null)))))
 
 (defun emskin--jelly-push-current (&optional force)
@@ -182,10 +186,9 @@ When FORCE is non-nil, bypass the last-rectangle deduplication guard."
         (emskin--jelly-send nil)
         (setq emskin--jelly-last-info nil)))
      (t
-      (let ((key (cons window
-                       (format "%d:%d:%d:%d:%s"
-                               (nth 0 info) (nth 1 info)
-                               (nth 2 info) (nth 3 info) (nth 4 info)))))
+      (let ((key (list window info
+                       (and (bound-and-true-p evil-local-mode) (eq evil-state 'insert))
+                       (frame-char-width) (frame-char-height))))
         (when (or force (not (equal key emskin--jelly-last-info)))
           (emskin--jelly-send info)
           (setq emskin--jelly-last-info key)))))))
